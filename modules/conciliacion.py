@@ -3,35 +3,9 @@ import pandas as pd
 import io
 from datetime import timedelta, datetime
 
-# --- 1. GESTIÓN DE ESTADO Y PERSISTENCIA (MOCK DATABASE) ---
-if 'db_sistema' not in st.session_state:
-    st.session_state['db_sistema'] = {
-        'inicializado': False,      # Marca si ya se configuró el saldo inicial histórico
-        'saldo_acumulado_m': 0.0,   # Saldo de arrastre Mayor
-        'saldo_acumulado_b': 0.0,   # Saldo de arrastre Banco
-        'fecha_cierre': None,       # Última fecha real de operación
-        'historial': [],            # Lista de conciliaciones cerradas con detalle
-        'partidas_arrastradas_m': pd.DataFrame(), # Pendientes del Mayor de períodos anteriores
-        'partidas_arrastradas_b': pd.DataFrame(),  # Pendientes del Banco de períodos anteriores
-        'last_closed_period': None # Tupla (month_idx, year)
-    }
-# Patch para estados de sesión antiguos que no tienen la nueva clave
-if 'last_closed_period' not in st.session_state['db_sistema']:
-    st.session_state['db_sistema']['last_closed_period'] = None
+# --- 2. FUNCIONES DE PROCESAMIENTO (HELPERS) ---
+# Estas funciones se quedan fuera porque son herramientas genéricas
 
-if 'keywords_gastos' not in st.session_state:
-    st.session_state['keywords_gastos'] = {
-        'Mantenimiento': ['MANT', 'CUENTA', 'PAQUETE', 'COMISION SERV'],
-        'Impuestos/Tasas': ['IMPUESTO', 'LEY 25413', 'PERCEPCION', 'RETENCION', 'SELLOS', 'SIRCREB'],
-        'IVA': ['IVA VENTAS', 'IVA DEBITO', 'IVA 21'],
-        'Comisiones Bancarias': ['COMISION', 'CARGO', 'GASTO EMISION'],
-        'Intereses': ['INTERES', 'INT. PAGO']
-    }
-
-if 'conciliacion_activa' not in st.session_state:
-    st.session_state['conciliacion_activa'] = None
-
-# --- 2. FUNCIONES DE PROCESAMIENTO (CORE) ---
 def clean_num(value):
     if pd.isna(value) or value == '': return 0.0
     if isinstance(value, (int, float)): return float(value)
@@ -111,43 +85,44 @@ def convert_df_to_excel(df):
 
 # --- 3. RENDERIZADO PRINCIPAL ---
 def render():
-    st.title("📂 Conciliación Bancaria")
-
-    # --- 1. INICIALIZACIÓN DE LA MEMORIA (Session State) ---
-    # Esto evita el KeyError y mantiene los datos vivos
+    
+    # ==============================================================================
+    # 1. GESTIÓN DE ESTADO Y PERSISTENCIA (MOVIDO AQUÍ PARA EVITAR KEYERROR)
+    # ==============================================================================
     if 'db_sistema' not in st.session_state:
         st.session_state['db_sistema'] = {
-            'inicializado': True, 
-            'datos_mayor': None, 
-            'datos_banco': None,
-            'resultados': None
+            'inicializado': False,      # Marca si ya se configuró el saldo inicial histórico
+            'saldo_acumulado_m': 0.0,   # Saldo de arrastre Mayor
+            'saldo_acumulado_b': 0.0,   # Saldo de arrastre Banco
+            'fecha_cierre': None,       # Última fecha real de operación
+            'historial': [],            # Lista de conciliaciones cerradas con detalle
+            'partidas_arrastradas_m': pd.DataFrame(), # Pendientes del Mayor de períodos anteriores
+            'partidas_arrastradas_b': pd.DataFrame(),  # Pendientes del Banco de períodos anteriores
+            'last_closed_period': None # Tupla (month_idx, year)
         }
 
-    # --- 2. CARGA DE ARCHIVOS ---
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        f_mayor = st.file_uploader("Subir Libro Mayor (Excel/CSV)", type=['xlsx', 'csv'])
-        if f_mayor:
-            # Guardamos el archivo procesado en la memoria
-            st.session_state['db_sistema']['datos_mayor'] = pd.read_excel(f_mayor) if f_mayor.name.endswith('xlsx') else pd.read_csv(f_mayor)
-            st.success("Mayor cargado")
+    # Patch para estados de sesión antiguos
+    if 'last_closed_period' not in st.session_state['db_sistema']:
+        st.session_state['db_sistema']['last_closed_period'] = None
 
-    with col2:
-        f_banco = st.file_uploader("Subir Extracto Bancario (Excel/CSV)", type=['xlsx', 'csv'])
-        if f_banco:
-            # Guardamos el extracto en la memoria
-            st.session_state['db_sistema']['datos_banco'] = pd.read_excel(f_banco) if f_banco.name.endswith('xlsx') else pd.read_csv(f_banco)
-            st.success("Extracto cargado")
+    if 'keywords_gastos' not in st.session_state:
+        st.session_state['keywords_gastos'] = {
+            'Mantenimiento': ['MANT', 'CUENTA', 'PAQUETE', 'COMISION SERV'],
+            'Impuestos/Tasas': ['IMPUESTO', 'LEY 25413', 'PERCEPCION', 'RETENCION', 'SELLOS', 'SIRCREB'],
+            'IVA': ['IVA VENTAS', 'IVA DEBITO', 'IVA 21'],
+            'Comisiones Bancarias': ['COMISION', 'CARGO', 'GASTO EMISION'],
+            'Intereses': ['INTERES', 'INT. PAGO']
+        }
 
-    # --- 3. USO DE LOS DATOS GUARDADOS ---
-    # Ahora, en lugar de usar variables sueltas, usamos lo que está en st.session_state
-    if st.session_state['db_sistema']['datos_mayor'] is not None and st.session_state['db_sistema']['datos_banco'] is not None:
-        st.info("Ambos archivos están en memoria. Ya puedes ejecutar la conciliación.")
-        
-        if st.button("Ejecutar Conciliación Now"):
-            # Aquí iría tu lógica de cruce de datos
-            st.write("Procesando...")
+    if 'conciliacion_activa' not in st.session_state:
+        st.session_state['conciliacion_activa'] = None
+
+    # ==============================================================================
+    # 2. INTERFAZ GRÁFICA
+    # ==============================================================================
+    st.title("🏦 Sistema de Conciliación Bancaria")
+
+    tab_proc, tab_hist, tab_config = st.tabs(["🚀 Conciliación Activa", "📚 Historial de Cierres", "⚙️ Configuración"])
 
     # ---------------------------------------------------------
     # PESTAÑA 3: CONFIGURACIÓN
@@ -164,7 +139,7 @@ def render():
                     f_inicio = st.date_input("Fecha de Inicio")
                     init_m = st.number_input("Saldo Inicial Histórico - Mayor", value=0.0, format="%.2f")
                     init_b = st.number_input("Saldo Inicial Histórico - Banco", value=0.0, format="%.2f")
-                    
+                
                     if st.form_submit_button("💾 Inicializar Sistema"):
                         st.session_state['db_sistema']['inicializado'] = True
                         st.session_state['db_sistema']['saldo_acumulado_m'] = init_m
@@ -399,7 +374,7 @@ def render():
                             res['p_b']['Ajustar en Libros'] = edited_pb['Ajustar en Libros']
                         except Exception as e:
                             st.warning(f"No hay partidas pendientes del banco para mostrar o hay un error de configuración.")
-                        
+            
                         if st.button("Confirmar Ajustes Realizados", key="btn_confirmar_ajustes", type="primary"):
                             p_b_ajustados_mask = res['p_b']['Ajustar en Libros'].fillna(False).astype(bool)
                             p_b_ajustados = res['p_b'][p_b_ajustados_mask]
@@ -694,4 +669,3 @@ def render():
                     )
         else:
             st.info("Aún no hay períodos cerrados en el historial.")
-
