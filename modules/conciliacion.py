@@ -111,9 +111,43 @@ def convert_df_to_excel(df):
 
 # --- 3. RENDERIZADO PRINCIPAL ---
 def render():
-    st.title("🏦 Sistema de Conciliación Bancaria")
+    st.title("📂 Conciliación Bancaria")
 
-    tab_proc, tab_hist, tab_config = st.tabs(["🚀 Conciliación Activa", "📚 Historial de Cierres", "⚙️ Configuración"])
+    # --- 1. INICIALIZACIÓN DE LA MEMORIA (Session State) ---
+    # Esto evita el KeyError y mantiene los datos vivos
+    if 'db_sistema' not in st.session_state:
+        st.session_state['db_sistema'] = {
+            'inicializado': True, 
+            'datos_mayor': None, 
+            'datos_banco': None,
+            'resultados': None
+        }
+
+    # --- 2. CARGA DE ARCHIVOS ---
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        f_mayor = st.file_uploader("Subir Libro Mayor (Excel/CSV)", type=['xlsx', 'csv'])
+        if f_mayor:
+            # Guardamos el archivo procesado en la memoria
+            st.session_state['db_sistema']['datos_mayor'] = pd.read_excel(f_mayor) if f_mayor.name.endswith('xlsx') else pd.read_csv(f_mayor)
+            st.success("Mayor cargado")
+
+    with col2:
+        f_banco = st.file_uploader("Subir Extracto Bancario (Excel/CSV)", type=['xlsx', 'csv'])
+        if f_banco:
+            # Guardamos el extracto en la memoria
+            st.session_state['db_sistema']['datos_banco'] = pd.read_excel(f_banco) if f_banco.name.endswith('xlsx') else pd.read_csv(f_banco)
+            st.success("Extracto cargado")
+
+    # --- 3. USO DE LOS DATOS GUARDADOS ---
+    # Ahora, en lugar de usar variables sueltas, usamos lo que está en st.session_state
+    if st.session_state['db_sistema']['datos_mayor'] is not None and st.session_state['db_sistema']['datos_banco'] is not None:
+        st.info("Ambos archivos están en memoria. Ya puedes ejecutar la conciliación.")
+        
+        if st.button("Ejecutar Conciliación Now"):
+            # Aquí iría tu lógica de cruce de datos
+            st.write("Procesando...")
 
     # ---------------------------------------------------------
     # PESTAÑA 3: CONFIGURACIÓN
@@ -660,3 +694,4 @@ def render():
                     )
         else:
             st.info("Aún no hay períodos cerrados en el historial.")
+
