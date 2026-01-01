@@ -1,23 +1,23 @@
 import streamlit as st
-import hashlib
-
-# Importamos el módulo (asegúrate de que la carpeta modules tenga __init__.py)
 from modules import conciliacion
+from modules import conciliador_v2
+
+# --- NUEVOS IMPORTS PARA LA BASE DE DATOS ---
+# Importamos la conexión y el modelo de Usuario desde models.py
+from models import SessionLocal, User, init_db
 
 # 1. CONFIGURACIÓN GENERAL
 st.set_page_config(page_title="Plataforma Contable", layout="wide", page_icon="📊")
 
-# --- SEGURIDAD Y LOGIN ---
-def make_hashes(password):
-    return hashlib.sha256(str.encode(password)).hexdigest()
+# --- INICIALIZACIÓN DE LA BASE DE DATOS ---
+# Esto crea las tablas si no existen.
+init_db()
 
-def check_hashes(password, hashed_text):
-    return make_hashes(password) == hashed_text
-
-DB_USERS = {"Tuvieja": "03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4"} # 1234
+# --- SEGURIDAD Y LOGIN (ACTUALIZADO CON BASE DE DATOS) ---
 
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
 if 'username' not in st.session_state: st.session_state['username'] = ''
+if 'user_id' not in st.session_state: st.session_state['user_id'] = None
 
 def login_screen():
     col1, col2, col3 = st.columns([1,1,1])
@@ -25,36 +25,57 @@ def login_screen():
         st.title("🔐 Acceso Seguro")
         u = st.text_input("Usuario")
         p = st.text_input("Contraseña", type="password")
+        
         if st.button("Ingresar", use_container_width=True):
-            if u in DB_USERS and check_hashes(p, DB_USERS[u]):
-                st.session_state['logged_in'] = True
-                st.session_state['username'] = u
-                st.rerun()
+            # Abrimos sesión temporal con la base de datos
+            db = SessionLocal()
+            
+            # Buscamos al usuario por su nombre
+            user = db.query(User).filter(User.username == u).first()
+            
+            # Verificamos si existe y si la contraseña coincide (usando el método seguro)
+            if user and user.check_password(p):
+                # Si es correcto, verificamos si está activo (pagó suscripción)
+                if user.is_active:
+                    st.session_state['logged_in'] = True
+                    st.session_state['username'] = user.username
+                    st.session_state['user_id'] = user.id
+                    db.close()
+                    st.rerun()
+                else:
+                    st.error("Su cuenta está inactiva. Contacte a soporte.")
             else:
-                st.error("Credenciales incorrectas")
+                st.error("Usuario o contraseña incorrectos")
+            
+            db.close()
 
 # --- APP PRINCIPAL ---
 if not st.session_state['logged_in']:
     login_screen()
 else:
-    # BARRA LATERAL (MENÚ)
+    # BARRA LATERAL (MENÚ) - (SIN CAMBIOS)
     with st.sidebar:
         st.write(f"👤 **{st.session_state['username']}**")
         st.divider()
-        menu = st.radio("Herramientas", ["Inicio", "Conciliación Bancaria", "OCR Facturas (Beta)"])
+        menu = st.radio("Herramientas", ["Inicio", "Conciliación Bancaria", "Segunda version conciliador", "OCR Facturas (Beta)"])
         st.divider()
         if st.button("Cerrar Sesión"):
             st.session_state['logged_in'] = False
+            st.session_state['username'] = ''
+            st.session_state['user_id'] = None
             st.rerun()
 
-    # RUTEO DE MÓDULOS
+    # RUTEO DE MÓDULOS - (SIN CAMBIOS)
     if menu == "Inicio":
         st.title("Bienvenido a tu Panel Contable")
         st.info("Selecciona una herramienta en el menú de la izquierda para comenzar.")
         
     elif menu == "Conciliación Bancaria":
-        # ¡Aquí llamamos al módulo limpio!
+        # Llamamos al módulo tal cual estaba
         conciliacion.render()
+
+    elif menu == "Segunda version conciliador":
+        conciliador_v2.run()
         
     elif menu == "OCR Facturas (Beta)":
         st.title("📷 OCR de Facturas")
