@@ -2,9 +2,23 @@ import streamlit as st
 import pandas as pd
 import io
 from datetime import timedelta, datetime
+# --- NUEVOS IMPORTS PARA LA BASE DE DATOS ---
+from models import SessionLocal, Conciliacion, User  
+import json 
 
 # --- 2. FUNCIONES DE PROCESAMIENTO (HELPERS) ---
-# Estas funciones se quedan fuera porque son herramientas genéricas
+
+# --- FIX: Función movida aquí para que esté disponible globalmente ---
+def rename_duplicates(df):
+    """Renombra columnas duplicadas para evitar errores de pandas (ej. Fecha, Fecha_1)"""
+    if df.empty: return df
+    cols = pd.Series(df.columns)
+    for dup in cols[cols.duplicated()].unique():
+        cols[cols[cols == dup].index.values.tolist()] = [
+            f"{dup}_{i}" if i != 0 else dup for i in range(sum(cols == dup))
+        ]
+    df.columns = cols
+    return df
 
 def clean_num(value):
     if pd.isna(value) or value == '': return 0.0
@@ -87,7 +101,7 @@ def convert_df_to_excel(df):
 def render():
     
     # ==============================================================================
-    # 1. GESTIÓN DE ESTADO Y PERSISTENCIA (MOVIDO AQUÍ PARA EVITAR KEYERROR)
+    # 1. GESTIÓN DE ESTADO Y PERSISTENCIA
     # ==============================================================================
     if 'db_sistema' not in st.session_state:
         st.session_state['db_sistema'] = {
@@ -154,6 +168,9 @@ def render():
                 if st.button("⚠️ Reiniciar Sistema (Borrar Todo)"):
                     st.session_state['db_sistema']['inicializado'] = False
                     st.session_state['db_sistema']['historial'] = []
+                    # Limpiamos también los arrastres para reiniciar limpio
+                    st.session_state['db_sistema']['partidas_arrastradas_m'] = pd.DataFrame()
+                    st.session_state['db_sistema']['partidas_arrastradas_b'] = pd.DataFrame()
                     st.rerun()
 
         with c_conf2:
@@ -299,10 +316,47 @@ def render():
                     p_m = p_m.reset_index(drop=True)
                     p_b = p_b.reset_index(drop=True)
 
-                    if not sin_mayor and not st.session_state['db_sistema']['partidas_arrastradas_m'].empty:
-                        p_m = pd.concat([st.session_state['db_sistema']['partidas_arrastradas_m'], p_m], ignore_index=True)
+                    # --- FIX ERROR PANDAS: LIMPIAR DUPLICADOS ANTES DE CONCAT ---
+                    p_m = rename_duplicates(p_m)
+                    p_b = rename_duplicates(p_b)
+                    
+                    # 1. Recuperar pendientes del MAYOR (independientemente de sin_mayor)
+                    if not st.session_state['db_sistema']['partidas_arrastradas_m'].empty:
+                        arrastre_m = st.session_state['db_sistema']['partidas_arrastradas_m'].copy()
+                        arrastre_m = rename_duplicates(arrastre_m)
+
+                        # --- FIX CRITICO: NORMALIZAR COLUMNAS (Lógica replicada de BANCO) ---
+                        target_f, target_d = c_f_m, c_d_m
+                        if target_f not in p_m.columns:
+                            matches = [c for c in p_m.columns if str(c).startswith(str(c_f_m))]
+                            if matches: target_f = matches[0]
+                        if target_d not in p_m.columns:
+                            matches = [c for c in p_m.columns if str(c).startswith(str(c_d_m))]
+                            if matches: target_d = matches[0]
+
+                        if '_saved_fecha' in arrastre_m.columns and not sin_mayor:
+                            arrastre_m = arrastre_m.rename(columns={'_saved_fecha': target_f, '_saved_desc': target_d})
+                        
+                        p_m = pd.concat([arrastre_m, p_m], ignore_index=True)
+
+                    # 2. Recuperar pendientes del BANCO
                     if not st.session_state['db_sistema']['partidas_arrastradas_b'].empty:
-                        p_b = pd.concat([st.session_state['db_sistema']['partidas_arrastradas_b'], p_b], ignore_index=True)
+                        arrastre_b = st.session_state['db_sistema']['partidas_arrastradas_b'].copy()
+                        arrastre_b = rename_duplicates(arrastre_b)
+
+                        # --- FIX CRITICO: NORMALIZAR COLUMNAS BANCO ---
+                        target_f, target_d = c_f_b, c_d_b
+                        if target_f not in p_b.columns:
+                            matches = [c for c in p_b.columns if str(c).startswith(str(c_f_b))]
+                            if matches: target_f = matches[0]
+                        if target_d not in p_b.columns:
+                            matches = [c for c in p_b.columns if str(c).startswith(str(c_d_b))]
+                            if matches: target_d = matches[0]
+
+                        if '_saved_fecha' in arrastre_b.columns:
+                            arrastre_b = arrastre_b.rename(columns={'_saved_fecha': target_f, '_saved_desc': target_d})
+                            
+                        p_b = pd.concat([arrastre_b, p_b], ignore_index=True)
                     
                     p_m['Anular por Error'] = False
                     p_b['Ajustar en Libros'] = False
@@ -349,12 +403,36 @@ def render():
                             st.rerun()
 
                         try:
-                            cols_to_show_m = [cmap['c_f_m'], cmap['c_d_m'], 'NETO', 'Anular por Error']
+                            # --- FIX DEFINITIVO DE VISUALIZACIÓN MAYOR ---
+                            # Estrategia: 1. Buscar nombre exacto. 2. Buscar nombre parecido. 3. Usar columnas por defecto si todo falla.
+                            
+                            c_f_m_final = cmap['c_f_m']
+                            if c_f_m_final not in res['p_m'].columns:
+                                matches = [c for c in res['p_m'].columns if str(c).startswith(str(cmap['c_f_m']))]
+                                if matches: c_f_m_final = matches[0]
+                            
+                            c_d_m_final = cmap['c_d_m']
+                            if c_d_m_final not in res['p_m'].columns:
+                                matches = [c for c in res['p_m'].columns if str(c).startswith(str(cmap['c_d_m']))]
+                                if matches: c_d_m_final = matches[0]
+
+                            cols_to_show_m = [c_f_m_final, c_d_m_final, 'NETO', 'Anular por Error']
+                            
+                            # Filtro estricto: Solo columnas que realmente existen
+                            cols_to_show_m = [c for c in cols_to_show_m if c in res['p_m'].columns]
+                            
+                            # FALLBACK DE SEGURIDAD: Si nos quedamos sin fecha/descripción, agregamos las primeras columnas
+                            if len(cols_to_show_m) <= 2: 
+                                safe_cols = [res['p_m'].columns[0]]
+                                if len(res['p_m'].columns) > 1: safe_cols.append(res['p_m'].columns[1])
+                                cols_to_show_m = safe_cols + cols_to_show_m
+                                cols_to_show_m = list(dict.fromkeys(cols_to_show_m)) # Quitar duplicados
+
                             edited_pm = st.data_editor(res['p_m'][cols_to_show_m], key='editor_pm', use_container_width=True,
                                                        column_config={"Anular por Error": st.column_config.CheckboxColumn(help="Marcar si esta partida fue un error en los libros y debe ser revertida.")})
                             res['p_m']['Anular por Error'] = edited_pm['Anular por Error']
                         except Exception as e:
-                            st.warning(f"No hay partidas pendientes del mayor para mostrar o hay un error de configuración.")
+                            st.warning(f"No hay partidas pendientes del mayor para mostrar o hubo un error de columnas.")
 
                 with tabs[2]:
                     st.info("Movimientos en el Extracto Bancario no encontrados en el Mayor. Marque los que ya ha contabilizado y confirme.")
@@ -367,20 +445,41 @@ def render():
                             res['p_b']['Ajustar en Libros'] = False
                             st.rerun()
 
-                        cols_to_show_b = [cmap['c_f_b'], cmap['c_d_b'], 'NETO', 'Ajustar en Libros']
                         try:
+                            # --- FIX DEFINITIVO DE VISUALIZACIÓN BANCO ---
+                            c_f_b_final = cmap['c_f_b']
+                            if c_f_b_final not in res['p_b'].columns:
+                                matches = [c for c in res['p_b'].columns if str(c).startswith(str(cmap['c_f_b']))]
+                                if matches: c_f_b_final = matches[0]
+                            
+                            c_d_b_final = cmap['c_d_b']
+                            if c_d_b_final not in res['p_b'].columns:
+                                matches = [c for c in res['p_b'].columns if str(c).startswith(str(cmap['c_d_b']))]
+                                if matches: c_d_b_final = matches[0]
+
+                            cols_to_show_b = [c_f_b_final, c_d_b_final, 'NETO', 'Ajustar en Libros']
+                            
+                            # Filtro estricto
+                            cols_to_show_b = [c for c in cols_to_show_b if c in res['p_b'].columns]
+                            
+                            # FALLBACK DE SEGURIDAD
+                            if len(cols_to_show_b) <= 2: 
+                                safe_cols = [res['p_b'].columns[0]]
+                                if len(res['p_b'].columns) > 1: safe_cols.append(res['p_b'].columns[1])
+                                cols_to_show_b = safe_cols + cols_to_show_b
+                                cols_to_show_b = list(dict.fromkeys(cols_to_show_b))
+
                             edited_pb = st.data_editor(res['p_b'][cols_to_show_b], key='editor_pb', use_container_width=True,
                                                        column_config={"Ajustar en Libros": st.column_config.CheckboxColumn(help="Marcar si ya contabilizaste esta partida en tus libros.")})
                             res['p_b']['Ajustar en Libros'] = edited_pb['Ajustar en Libros']
                         except Exception as e:
-                            st.warning(f"No hay partidas pendientes del banco para mostrar o hay un error de configuración.")
-            
+                            st.warning(f"No hay partidas pendientes del banco para mostrar.")
+                        
                         if st.button("Confirmar Ajustes Realizados", key="btn_confirmar_ajustes", type="primary"):
                             p_b_ajustados_mask = res['p_b']['Ajustar en Libros'].fillna(False).astype(bool)
                             p_b_ajustados = res['p_b'][p_b_ajustados_mask]
                             
                             if not p_b_ajustados.empty:
-                                # FIX: Actualizar el saldo final del mayor con los ajustes confirmados
                                 total_ajustado = p_b_ajustados['NETO'].sum()
                                 res['s_fin_m'] += total_ajustado
 
@@ -404,38 +503,20 @@ def render():
                     st.markdown("##### 🤝 Cruce Manual de Partidas")
                     st.info("Selecciona partidas del Mayor (Izquierda) y del Banco (Derecha). Si la suma de ambas selecciones coincide, podrás confirmar el match.")
 
-                    # --- CORRECCION: LIMPIEZA DE COLUMNAS DUPLICADAS ---
-                    def rename_duplicates(df):
-                        cols = pd.Series(df.columns)
-                        for dup in cols[cols.duplicated()].unique():
-                            cols[cols[cols == dup].index.values.tolist()] = [
-                                f"{dup}_{i}" if i != 0 else dup for i in range(sum(cols == dup))
-                            ]
-                        df.columns = cols
-                        return df
+                    # --- NOTA: rename_duplicates ahora es global ---
+                    # res['p_m'] = rename_duplicates(res['p_m']) # Ya se hizo arriba
+                    # res['p_b'] = rename_duplicates(res['p_b']) # Ya se hizo arriba
 
-                    res['p_m'] = rename_duplicates(res['p_m'])
-                    res['p_b'] = rename_duplicates(res['p_b'])
+                    if 'Select_Match' not in res['p_m'].columns: res['p_m']['Select_Match'] = False
+                    if 'Select_Match' not in res['p_b'].columns: res['p_b']['Select_Match'] = False
 
-                    # --- 1. Inicialización de columnas de selección si no existen ---
-                    if 'Select_Match' not in res['p_m'].columns:
-                        res['p_m']['Select_Match'] = False
-                    if 'Select_Match' not in res['p_b'].columns:
-                        res['p_b']['Select_Match'] = False
-
-                    # --- 2. Filtros de Disponibilidad (Solo lo que no se marcó para anular/ajustar en pestañas anteriores) ---
-                    # Usamos índices reales para poder actualizar el DataFrame original después
                     idx_disp_m = res['p_m'][res['p_m']['Anular por Error'].fillna(False) == False].index
                     idx_disp_b = res['p_b'][res['p_b']['Ajustar en Libros'].fillna(False) == False].index
 
-                    # --- 3. Layout Principal ---
                     col_izq, col_cen, col_der = st.columns([0.48, 0.04, 0.48])
 
-                    # ----------------- COLUMNA IZQUIERDA: MAYOR -----------------
                     with col_izq:
                         st.write(f"**📖 Pendientes Mayor ({len(idx_disp_m)})**")
-                        
-                        # Botones de selección masiva Mayor
                         c_btn_m1, c_btn_m2 = st.columns(2)
                         if c_btn_m1.button("✅ Todos", key="sel_all_m"):
                             res['p_m'].loc[idx_disp_m, 'Select_Match'] = True
@@ -444,31 +525,35 @@ def render():
                             res['p_m'].loc[idx_disp_m, 'Select_Match'] = False
                             st.rerun()
 
-                        # Editor de datos Mayor
-                        # Recuperamos nombre actual de la columna por si fue renombrada
-                        c_f_m_actual = res['p_m'].columns[res['p_m'].columns.get_loc(cmap['c_f_m'])] if cmap['c_f_m'] in res['p_m'].columns else cmap['c_f_m']
+                        # --- FIX VISUALIZACIÓN: CONSTRUCCION SEGURA DE COLUMNAS ---
+                        cols_view_m = ['Select_Match']
                         
-                        cols_view_m = ['Select_Match', c_f_m_actual, cmap['c_d_m'], 'NETO']
+                        col_f_m = cmap['c_f_m']
+                        if col_f_m not in res['p_m'].columns:
+                            possibles = [c for c in res['p_m'].columns if str(c).startswith(str(col_f_m))]
+                            if possibles: col_f_m = possibles[0]
+                        if col_f_m in res['p_m'].columns: cols_view_m.append(col_f_m)
+
+                        col_d_m = cmap['c_d_m']
+                        if col_d_m not in res['p_m'].columns:
+                            possibles = [c for c in res['p_m'].columns if str(c).startswith(str(col_d_m))]
+                            if possibles: col_d_m = possibles[0]
                         
+                        if col_d_m in res['p_m'].columns and col_d_m not in cols_view_m:
+                            cols_view_m.append(col_d_m)
+
+                        cols_view_m.append('NETO')
+                        # -----------------------------------------------------------
+
                         edited_m = st.data_editor(
                             res['p_m'].loc[idx_disp_m, cols_view_m],
-                            key="editor_manual_m",
-                            hide_index=True,
-                            use_container_width=True,
-                            column_config={
-                                "Select_Match": st.column_config.CheckboxColumn("Seleccionar", width="small"),
-                                "NETO": st.column_config.NumberColumn("Importe", format="$ %.2f")
-                            }
+                            key="editor_manual_m", hide_index=True, use_container_width=True,
+                            column_config={"Select_Match": st.column_config.CheckboxColumn("Seleccionar", width="small"), "NETO": st.column_config.NumberColumn("Importe", format="$ %.2f")}
                         )
-                        # Actualizamos estado de selección en el DF original
-                        if not edited_m.empty:
-                            res['p_m'].update(edited_m['Select_Match'])
+                        if not edited_m.empty: res['p_m'].update(edited_m['Select_Match'])
 
-                    # ----------------- COLUMNA DERECHA: BANCO -----------------
                     with col_der:
                         st.write(f"**🏦 Pendientes Banco ({len(idx_disp_b)})**")
-
-                        # Botones de selección masiva Banco
                         c_btn_b1, c_btn_b2 = st.columns(2)
                         if c_btn_b1.button("✅ Todos", key="sel_all_b"):
                             res['p_b'].loc[idx_disp_b, 'Select_Match'] = True
@@ -477,30 +562,34 @@ def render():
                             res['p_b'].loc[idx_disp_b, 'Select_Match'] = False
                             st.rerun()
 
-                        # Editor de datos Banco
-                        # Recuperamos nombre actual de la columna por si fue renombrada (Corrección del error)
-                        c_f_b_actual = res['p_b'].columns[res['p_b'].columns.get_loc(cmap['c_f_b'])] if cmap['c_f_b'] in res['p_b'].columns else cmap['c_f_b']
+                        # --- FIX VISUALIZACIÓN BANCO ---
+                        cols_view_b = ['Select_Match']
+                        
+                        col_f_b = cmap['c_f_b']
+                        if col_f_b not in res['p_b'].columns:
+                            possibles = [c for c in res['p_b'].columns if str(c).startswith(str(col_f_b))]
+                            if possibles: col_f_b = possibles[0]
+                        if col_f_b in res['p_b'].columns: cols_view_b.append(col_f_b)
 
-                        cols_view_b = ['Select_Match', c_f_b_actual, cmap['c_d_b'], 'NETO']
+                        col_d_b = cmap['c_d_b']
+                        if col_d_b not in res['p_b'].columns:
+                            possibles = [c for c in res['p_b'].columns if str(c).startswith(str(col_d_b))]
+                            if possibles: col_d_b = possibles[0]
+
+                        if col_d_b in res['p_b'].columns and col_d_b not in cols_view_b:
+                            cols_view_b.append(col_d_b)
+                        
+                        cols_view_b.append('NETO')
+                        # -------------------------------
                         
                         edited_b = st.data_editor(
                             res['p_b'].loc[idx_disp_b, cols_view_b],
-                            key="editor_manual_b",
-                            hide_index=True,
-                            use_container_width=True,
-                            column_config={
-                                "Select_Match": st.column_config.CheckboxColumn("Seleccionar", width="small"),
-                                "NETO": st.column_config.NumberColumn("Importe", format="$ %.2f")
-                            }
+                            key="editor_manual_b", hide_index=True, use_container_width=True,
+                            column_config={"Select_Match": st.column_config.CheckboxColumn("Seleccionar", width="small"), "NETO": st.column_config.NumberColumn("Importe", format="$ %.2f")}
                         )
-                        # Actualizamos estado de selección en el DF original
-                        if not edited_b.empty:
-                            res['p_b'].update(edited_b['Select_Match'])
+                        if not edited_b.empty: res['p_b'].update(edited_b['Select_Match'])
 
-                    # ----------------- LÓGICA DE VALIDACIÓN Y CRUCE -----------------
                     st.divider()
-                    
-                    # Calcular sumas de lo seleccionado (buscando en el DF original actualizado)
                     sel_m = res['p_m'].loc[res['p_m']['Select_Match'] == True]
                     sel_b = res['p_b'].loc[res['p_b']['Select_Match'] == True]
 
@@ -508,69 +597,61 @@ def render():
                     sum_b = sel_b['NETO'].sum()
                     diff_match = round(sum_m - sum_b, 2)
 
-                    # Panel de Resultados
                     c_res1, c_res2, c_res3, c_res4 = st.columns([1, 1, 1, 1.5])
                     c_res1.metric("Seleccionado Mayor", f"${sum_m:,.2f}")
                     c_res2.metric("Seleccionado Banco", f"${sum_b:,.2f}")
-                    
                     color_diff = "normal" if diff_match == 0 else "inverse"
                     c_res3.metric("Diferencia", f"${diff_match:,.2f}", delta_color=color_diff)
 
                     with c_res4:
                         st.write("### Acciones")
-                        # Condiciones para habilitar el botón:
-                        # 1. Diferencia cero.
-                        # 2. Algo seleccionado en ambos lados (o al menos que la suma no sea 0 si es una anulación interna).
                         valid_match = (abs(diff_match) < 0.01) and (len(sel_m) > 0 or len(sel_b) > 0)
                         
                         if st.button("🔗 CONFIRMAR MATCH", type="primary", disabled=not valid_match, use_container_width=True):
-                            
                             new_matches = []
-                            match_id = datetime.now().strftime("%H%M%S") # ID simple para agrupar
-
-                            # LÓGICA DE TRAZABILIDAD LINEA A LINEA
-                            desc_group_b = f"Match Manual (Ref: {sel_b[cmap['c_d_b']].iloc[0] if not sel_b.empty else 'Var'}...)"
-                            desc_group_m = f"Match Manual (Ref: {sel_m[cmap['c_d_m']].iloc[0] if not sel_m.empty else 'Var'}...)"
+                            match_id = datetime.now().strftime("%H%M%S")
                             
-                            # A. Procesar líneas del Mayor seleccionadas
+                            def safe_get(row, col_name, fallback_cols):
+                                if col_name in row: return row[col_name]
+                                for c in fallback_cols:
+                                    if c in row: return row[c]
+                                return "S/D"
+
+                            desc_group_b = f"Match Manual (Ref: {safe_get(sel_b.iloc[0], cmap['c_d_b'], cols_view_b) if not sel_b.empty else 'Var'}...)"
+                            desc_group_m = f"Match Manual (Ref: {safe_get(sel_m.iloc[0], cmap['c_d_m'], cols_view_m) if not sel_m.empty else 'Var'}...)"
+                            
                             for idx, row in sel_m.iterrows():
                                 new_matches.append({
-                                    'Fecha_Mayor': row[cmap['c_f_m']] if cmap['c_f_m'] in row else row[c_f_m_actual],
-                                    'Detalle_Mayor': row[cmap['c_d_m']],
+                                    'Fecha_Mayor': safe_get(row, cmap['c_f_m'], cols_view_m),
+                                    'Detalle_Mayor': safe_get(row, cmap['c_d_m'], cols_view_m),
                                     'Monto': row['NETO'],
-                                    'Fecha_Banco': (sel_b[cmap['c_f_b']].iloc[0] if not sel_b.empty else row[c_f_m_actual]) if cmap['c_f_b'] in sel_b.columns else datetime.now(),
+                                    'Fecha_Banco': safe_get(sel_b.iloc[0], cmap['c_f_b'], cols_view_b) if not sel_b.empty else safe_get(row, cmap['c_f_m'], cols_view_m),
                                     'Detalle_Banco': f"🖇️ {desc_group_b} [ID:{match_id}]"
                                 })
 
-                            # B. Procesar líneas del Banco seleccionadas (SOLO si hay más items en banco que en mayor)
                             if sel_m.empty and not sel_b.empty:
                                 for idx, row in sel_b.iterrows():
                                     new_matches.append({
-                                        'Fecha_Mayor': row[c_f_b_actual], # Usamos fecha banco
+                                        'Fecha_Mayor': safe_get(row, cmap['c_f_b'], cols_view_b),
                                         'Detalle_Mayor': f"🖇️ {desc_group_m} [ID:{match_id}]",
-                                        'Monto': row['NETO'], # Monto real
-                                        'Fecha_Banco': row[c_f_b_actual],
-                                        'Detalle_Banco': row[cmap['c_d_b']]
+                                        'Monto': row['NETO'],
+                                        'Fecha_Banco': safe_get(row, cmap['c_f_b'], cols_view_b),
+                                        'Detalle_Banco': safe_get(row, cmap['c_d_b'], cols_view_b)
                                     })
                             
-                            # Eliminar de los pendientes (Esto es lo CRÍTICO para el cálculo matemático)
                             res['p_m'] = res['p_m'].drop(sel_m.index).reset_index(drop=True)
                             res['p_b'] = res['p_b'].drop(sel_b.index).reset_index(drop=True)
-                            
-                            # Agregar a conciliados
                             res['matched'] = pd.concat([res.get('matched', pd.DataFrame()), pd.DataFrame(new_matches)], ignore_index=True)
-                            
-                            st.success(f"✅ ¡Conciliado! Se cruzaron {len(sel_m)} partidas de Mayor con {len(sel_b)} de Banco.")
+                            st.success(f"✅ ¡Conciliado!")
                             st.rerun()
 
                         if not valid_match and (len(sel_m) > 0 or len(sel_b) > 0):
-                            st.caption("⚠️ Las sumas deben ser idénticas para conciliar.")
+                            st.caption("⚠️ Las sumas deben ser idénticas.")
             
             # --- CÁLCULOS Y CIERRE ---
             p_m_anulados = res['p_m'][res['p_m']['Anular por Error'].fillna(False)]
             ajuste_por_anulacion = p_m_anulados['NETO'].sum()
             
-            # Este ajuste es solo para el cálculo teórico, el real ya está en s_fin_m
             p_b_para_ajuste_teorico = res['p_b'][res['p_b']['Ajustar en Libros'].fillna(False)]
             ajuste_por_banco_teorico = p_b_para_ajuste_teorico['NETO'].sum()
             
@@ -585,8 +666,7 @@ def render():
             m_ajustado_teorico = mayor_ajustado_real - partidas_m_pend_neto + partidas_b_pend_neto
             
             s_fin_b_numeric = pd.to_numeric(res.get('s_fin_b'), errors='coerce')
-            if pd.isna(s_fin_b_numeric):
-                s_fin_b_numeric = 0.0
+            if pd.isna(s_fin_b_numeric): s_fin_b_numeric = 0.0
             dif_final = round(m_ajustado_teorico - s_fin_b_numeric, 2)
 
             st.divider()
@@ -618,20 +698,45 @@ def render():
             
             if c_close2.button("✅ Confirmar Cierre", type="primary", disabled=(dif_final != 0)):
                 sel_mes, sel_anio = res['periodo'].split()
-                st.session_state['db_sistema']['historial'].append({
-                    "Periodo": res['periodo'], "Fecha Cierre": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "Saldo Final Mayor": mayor_ajustado_real, "Saldo Final Banco": res['s_fin_b'],
-                    "Estado": "CERRADO OK" if dif_final == 0 else "CERRADO CON DIF.", "Hoja_Trabajo": df_reconcile
-                })
+                
+                # 1. GUARDAR EN BASE DE DATOS
+                db = SessionLocal()
+                hoja_trabajo_dict = df_reconcile.to_dict(orient='records')
+                
+                nueva_conciliacion = Conciliacion(
+                    user_id=st.session_state['user_id'],
+                    periodo_mes=meses.index(sel_mes) + 1,
+                    periodo_anio=int(sel_anio),
+                    fecha_cierre=datetime.now(),
+                    saldo_mayor=mayor_ajustado_real,
+                    saldo_banco=res['s_fin_b'],
+                    estado="CERRADO OK" if dif_final == 0 else "CERRADO CON DIF.",
+                    datos_hoja_trabajo=hoja_trabajo_dict
+                )
+                db.add(nueva_conciliacion)
+                db.commit()
+                db.close()
+
+                # 2. PREPARAR ARRASTRES (ESTANDARIZANDO COLUMNAS)
+                pm_save = p_m_no_anular.drop(columns=['Anular por Error'], errors='ignore')
+                pb_save = p_b_no_ajustar.drop(columns=['Ajustar en Libros'], errors='ignore')
+                
+                if cmap['c_f_m'] in pm_save.columns: pm_save = pm_save.rename(columns={cmap['c_f_m']: '_saved_fecha'})
+                if cmap['c_d_m'] in pm_save.columns: pm_save = pm_save.rename(columns={cmap['c_d_m']: '_saved_desc'})
+
+                if cmap['c_f_b'] in pb_save.columns: pb_save = pb_save.rename(columns={cmap['c_f_b']: '_saved_fecha'})
+                if cmap['c_d_b'] in pb_save.columns: pb_save = pb_save.rename(columns={cmap['c_d_b']: '_saved_desc'})
+
                 st.session_state['db_sistema']['saldo_acumulado_m'] = mayor_ajustado_real
                 st.session_state['db_sistema']['saldo_acumulado_b'] = res['s_fin_b']
                 st.session_state['db_sistema']['last_closed_period'] = (meses.index(sel_mes), int(sel_anio))
-                st.session_state['db_sistema']['partidas_arrastradas_m'] = p_m_no_anular.drop(columns=['Anular por Error'], errors='ignore')
-                st.session_state['db_sistema']['partidas_arrastradas_b'] = p_b_no_ajustar.drop(columns=['Ajustar en Libros'], errors='ignore')
+                
+                st.session_state['db_sistema']['partidas_arrastradas_m'] = pm_save
+                st.session_state['db_sistema']['partidas_arrastradas_b'] = pb_save
             
                 st.session_state['conciliacion_activa'] = None
                 st.session_state.conciliacion_step = 'upload'
-                st.success(f"✨ ¡CONCILIACIÓN DE {res['periodo']} CERRADA!")
+                st.success(f"✨ ¡CONCILIACIÓN DE {res['periodo']} GUARDADA EN BASE DE DATOS!")
                 st.rerun()
 
             if c_close3.button("❌ Cancelar"):
@@ -645,27 +750,39 @@ def render():
     # ---------------------------------------------------------
     with tab_hist:
         st.subheader("📚 Historial de Conciliaciones")
-        historial = st.session_state['db_sistema']['historial']
-        if len(historial) > 0:
-            df_hist_view = pd.DataFrame(historial)[['Periodo', 'Fecha Cierre', 'Saldo Final Mayor', 'Saldo Final Banco', 'Estado']]
-            st.dataframe(df_hist_view, use_container_width=True)
+        db = SessionLocal()
+        conciliaciones_db = db.query(Conciliacion).filter_by(user_id=st.session_state['user_id']).all()
+        db.close()
+
+        if conciliaciones_db:
+            data_view = []
+            for c in conciliaciones_db:
+                mes_nombre = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"][c.periodo_mes - 1]
+                data_view.append({
+                    "ID": c.id, "Periodo": f"{mes_nombre} {c.periodo_anio}",
+                    "Fecha Cierre": c.fecha_cierre.strftime("%Y-%m-%d %H:%M"),
+                    "Saldo Final Mayor": c.saldo_mayor, "Saldo Final Banco": c.saldo_banco, "Estado": c.estado
+                })
+            
+            st.dataframe(pd.DataFrame(data_view), use_container_width=True)
             st.divider()
+            
             st.write("#### 🔎 Visualizar Conciliación Anterior")
-            opciones = [f"{r['Periodo']} (Cerrado el: {r['Fecha Cierre']})" for r in historial]
-            seleccion_str = st.selectbox("Selecciona un período cerrado:", opciones)
+            opciones = {f"{d['Periodo']} (ID: {d['ID']})": d['ID'] for d in data_view}
+            seleccion_str = st.selectbox("Selecciona un período cerrado:", list(opciones.keys()))
+            
             if seleccion_str:
-                periodo_buscado = seleccion_str.split(" (")[0]
-                registro_sel = next((r for r in historial if r['Periodo'] == periodo_buscado), None)
+                id_sel = opciones[seleccion_str]
+                registro_sel = next((c for c in conciliaciones_db if c.id == id_sel), None)
                 if registro_sel:
-                    st.info(f"Mostrando Hoja de Trabajo del período: {registro_sel['Periodo']}")
-                    df_recuperado = registro_sel['Hoja_Trabajo']
+                    st.info(f"Mostrando Hoja de Trabajo del período: {seleccion_str}")
+                    df_recuperado = pd.DataFrame(registro_sel.datos_hoja_trabajo)
                     st.table(df_recuperado.style.format({"Importe": "{:,.2f}"}).apply(style_summary, axis=1))
                     excel_data = convert_df_to_excel(df_recuperado)
                     st.download_button(
-                        label="📥 Descargar esta Conciliación (Excel)",
-                        data=excel_data,
-                        file_name=f"Conciliacion_{registro_sel['Periodo']}.xlsx",
+                        label="📥 Descargar esta Conciliación (Excel)", data=excel_data,
+                        file_name=f"Conciliacion_{registro_sel.periodo_mes}_{registro_sel.periodo_anio}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
         else:
-            st.info("Aún no hay períodos cerrados en el historial.")
+            st.info("Aún no tienes conciliaciones cerradas en la base de datos.")
